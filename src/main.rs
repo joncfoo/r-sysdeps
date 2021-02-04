@@ -10,10 +10,6 @@ enum Action {
     /// Get system dependencies for R packages
     #[structopt(name = "package")]
     Package {
-        /// Repository name (case-sensitive)
-        #[structopt(short, long, default_value = "all")]
-        repository: String,
-
         /// R packages
         #[structopt()]
         packages: Vec<String>,
@@ -25,10 +21,6 @@ enum Action {
         /// List all R repositories on server
         #[structopt(short, long = "list-repositories")]
         list: bool,
-
-        /// Repository name (case-sensitive)
-        #[structopt(short, long, default_value = "all")]
-        repository: String,
 
         /// Print binary package URL for repository
         #[structopt(short, long)]
@@ -54,6 +46,10 @@ struct Opt {
     /// RStudio Package Manager Server
     #[structopt(long = "server", default_value = "https://packagemanager.rstudio.com")]
     server: String,
+
+    /// Repository name (case-sensitive)
+    #[structopt(short, long, default_value = "server default")]
+    repository: String,
 
     /// Action
     #[structopt(subcommand)]
@@ -92,18 +88,17 @@ struct APIBioConductorVersion {
     cran_snapshot: String,
 }
 
-fn main() {
-    let opt = Opt::from_args();
+fn main() -> Result<()> {
+    let opt: Opt = Opt::from_args();
 
-    match detect_os() {
-        Some(os) => println!("OS = {}", os),
-        None => println!("Unsupported OS")
-    }
+    let os = detect_os(opt.os_name, opt.os_version)?;
 
     match server_status(opt.server) {
         Ok(response) => println!("{:#?}", response),
         err => eprintln!("error: {:#?}", err),
     }
+
+    Ok(())
 }
 
 fn server_status(server: String) -> Result<APIStatusResponse> {
@@ -122,7 +117,12 @@ fn server_status(server: String) -> Result<APIStatusResponse> {
     Ok(api_response)
 }
 
-fn detect_os() -> Option<String> {
+fn detect_os(os_name: Option<String>, os_version: Option<String>) -> Result<String> {
+    if let (Some(name), Some(version)) = (os_name, os_version) {
+        // user provided so just it
+        return Ok(format!("{}-{}", name, version));
+    }
+
     let known_os = vec![
         "ubuntu-16.04",
         "ubuntu-18.04",
@@ -131,7 +131,6 @@ fn detect_os() -> Option<String> {
         "centos-8",
         "rhel-7",
         "rhel-8",
-        "fedora-33",
     ];
     let mut os_rename = HashMap::new();
     os_rename.insert("rhel-7", "redhat-7");
@@ -147,7 +146,7 @@ fn detect_os() -> Option<String> {
             &os_attributes.insert(key_value[0].replace("\"", ""), key_value[1].replace("\"", ""));
         });
 
-    match (os_attributes.get("ID"), os_attributes.get("VERSION_ID")) {
+    let os = match (os_attributes.get("ID"), os_attributes.get("VERSION_ID")) {
         (Some(distribution), Some(version)) => {
             known_os.iter().filter_map(|&os| {
                 if os.starts_with(format!("{}-{}", distribution, version).as_str()) {
@@ -162,5 +161,8 @@ fn detect_os() -> Option<String> {
         _ => {
             None
         }
-    }
+    };
+
+    // TODO fix me
+    Ok(os.unwrap())
 }
