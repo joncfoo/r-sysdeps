@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use structopt::StructOpt;
 
@@ -47,9 +47,9 @@ struct Opt {
     #[structopt(long = "server", default_value = "https://packagemanager.rstudio.com")]
     server: String,
 
-    /// Repository name (case-sensitive)
-    #[structopt(short, long, default_value = "server default")]
-    repository: String,
+    /// Repository name (case-sensitive, default value: specified by server)
+    #[structopt(short, long)]
+    repository: Option<String>,
 
     /// Action
     #[structopt(subcommand)]
@@ -88,20 +88,95 @@ struct APIBioConductorVersion {
     cran_snapshot: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct APIRepository {
+    id: u64,
+    name: String,
+    description: Option<String>,
+    #[serde(rename = "type")]
+    language: String,
+}
+
 fn main() -> Result<()> {
-    let opt: Opt = Opt::from_args();
+    let mut opt: Opt = Opt::from_args();
+    let (distribution, release) = detect_os(opt.os_name, opt.os_version)?;
+    let rspm_status = server_status(&opt.server)?;
 
-    let os = detect_os(opt.os_name, opt.os_version)?;
+    if opt.repository.is_none() {
+        opt.repository = Some(rspm_status.cran_repo);
+    }
 
-    match server_status(opt.server) {
-        Ok(response) => println!("{:#?}", response),
-        err => eprintln!("error: {:#?}", err),
+    match opt.action {
+        Action::Package { packages } => {
+            // TODO
+        }
+        Action::Repository {
+            list,
+            binary_repository,
+            source_repository,
+        } => {
+            if list {
+                let repositories = server_repositories(&opt.server)?;
+                for repo in repositories.iter() {
+                    println!("{}", repo.name);
+                }
+            } else if source_repository {
+                println!("{}/{}/latest", opt.server, opt.repository.unwrap());
+            } else if binary_repository {
+                let distro = rspm_status
+                    .distros
+                    .iter()
+                    .filter(|distro| {
+                        distro.distribution == distribution && distro.release == release
+                    })
+                    .take(1)
+                    .next()
+                    .ok_or(anyhow!(
+                        "OS not supported by server: {}-{}",
+                        distribution,
+                        release
+                    ))?;
+
+                if !rspm_status.binaries_enabled {
+                    bail!("binary repositories not enabled on server")
+                } else if !distro.binaries {
+                    bail!("binary repositories not enabled for specified OS")
+                } else {
+                    println!(
+                        "{}/{}/__linux__/{}/latest",
+                        opt.server,
+                        opt.repository.unwrap(),
+                        distro.binary_url
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
-fn server_status(server: String) -> Result<APIStatusResponse> {
+fn server_repositories(server: &String) -> Result<Vec<APIRepository>> {
+    let http_response = minreq::get(format!("{}/__api__/repos", server))
+        .with_timeout(10)
+        .send()
+        .with_context(|| format!("failed to reach server {}", server))?;
+
+    if http_response.status_code < 200 || http_response.status_code > 299 {
+        bail!(format!("failed to reach {}/__api__/repos", server));
+    }
+
+    let api_response = http_response.json().with_context(|| {
+        format!(
+            "failed to parse JSON response from {}/__api__/repos",
+            server
+        )
+    })?;
+
+    Ok(api_response)
+}
+
+fn server_status(server: &String) -> Result<APIStatusResponse> {
     let http_response = minreq::get(format!("{}/__api__/status", server))
         .with_timeout(10)
         .send()
@@ -111,16 +186,20 @@ fn server_status(server: String) -> Result<APIStatusResponse> {
         bail!(format!("failed to reach {}/__api__/status", server));
     }
 
-    let api_response = http_response.json()
-        .with_context(|| format!("failed to parse JSON response from {}/__api__/status", server))?;
+    let api_response = http_response.json().with_context(|| {
+        format!(
+            "failed to parse JSON response from {}/__api__/status",
+            server
+        )
+    })?;
 
     Ok(api_response)
 }
 
-fn detect_os(os_name: Option<String>, os_version: Option<String>) -> Result<String> {
+fn detect_os(os_name: Option<String>, os_version: Option<String>) -> Result<(String, String)> {
     if let (Some(name), Some(version)) = (os_name, os_version) {
-        // user provided so just it
-        return Ok(format!("{}-{}", name, version));
+        // user provided so just use it
+        return Ok((name, version));
     }
 
     let known_os = vec![
@@ -139,30 +218,38 @@ fn detect_os(os_name: Option<String>, os_version: Option<String>) -> Result<Stri
     let mut os_attributes = HashMap::new();
 
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap();
-    os_release.lines()
+    os_release
+        .lines()
         .map(|line| line.split("=").collect())
         .filter(|parts: &Vec<_>| parts.len() == 2)
         .for_each(|key_value| {
-            &os_attributes.insert(key_value[0].replace("\"", ""), key_value[1].replace("\"", ""));
+            &os_attributes.insert(
+                key_value[0].replace("\"", ""),
+                key_value[1].replace("\"", ""),
+            );
         });
 
     let os = match (os_attributes.get("ID"), os_attributes.get("VERSION_ID")) {
-        (Some(distribution), Some(version)) => {
-            known_os.iter().filter_map(|&os| {
+        (Some(distribution), Some(version)) => known_os
+            .iter()
+            .filter_map(|&os| {
                 if os.starts_with(format!("{}-{}", distribution, version).as_str()) {
-                    os_rename.get(os)
+                    let os = os_rename
+                        .get(os)
                         .map(|&s| String::from(s))
                         .or(Some(String::from(os)))
+                        .unwrap();
+                    let os_parts: Vec<&str> = os.split("-").collect();
+                    Some((String::from(os_parts[0]), String::from(os_parts[1])))
                 } else {
                     None
                 }
-            }).next()
-        }
-        _ => {
-            None
-        }
+            })
+            .next(),
+        _ => None,
     };
 
-    // TODO fix me
-    Ok(os.unwrap())
+    os.ok_or(anyhow!(
+        "Failed to auto-detect this OS from the list contained in this tool"
+    ))
 }
