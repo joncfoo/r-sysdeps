@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
@@ -58,13 +60,66 @@ struct Opt {
     action: Action,
 }
 
+#[derive(Debug, Deserialize)]
+struct APIStatusResponse {
+    version: String,
+    build_date: String,
+    r_configured: bool,
+    binaries_enabled: bool,
+    distros: Vec<APIDistribution>,
+    cran_repo: String,
+    bioc_versions: Vec<APIBioConductorVersion>,
+}
+
+#[derive(Debug, Deserialize)]
+struct APIDistribution {
+    #[serde(rename = "binaryDisplay")]
+    binary_display: String,
+    #[serde(rename = "binaryURL")]
+    binary_url: String,
+    display: String,
+    distribution: String,
+    release: String,
+    #[serde(rename = "sysReqs")]
+    sys_reqs: bool,
+    binaries: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct APIBioConductorVersion {
+    bioc_version: String,
+    r_version: String,
+    cran_snapshot: String,
+}
+
 fn main() {
-    let _opt = Opt::from_args();
+    let opt = Opt::from_args();
 
     match detect_os() {
         Some(os) => println!("OS = {}", os),
         None => println!("Unsupported OS")
     }
+
+    match server_status(opt.server) {
+        Ok(response) => println!("{:#?}", response),
+        err => eprintln!("error: {:#?}", err),
+    }
+}
+
+fn server_status(server: String) -> Result<APIStatusResponse> {
+    let http_response = minreq::get(format!("{}/__api__/status", server))
+        .with_timeout(10)
+        .send()
+        .with_context(|| format!("failed to reach server {}", server))?;
+
+    if http_response.status_code < 200 || http_response.status_code > 299 {
+        bail!(format!("failed to reach {}/__api__/status", server));
+    }
+
+    let api_response = http_response.json()
+        .with_context(|| format!("failed to parse JSON response from {}/__api__/status", server))?;
+
+    Ok(api_response)
 }
 
 fn detect_os() -> Option<String> {
