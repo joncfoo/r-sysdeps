@@ -101,8 +101,24 @@ fn main() -> Result<()> {
     let mut opt: Opt = Opt::from_args();
     let (distribution, release) = detect_os(opt.os_name, opt.os_version)?;
     let rspm_status = server_status(&opt.server)?;
+    let repositories = server_repositories(&opt.server)?;
 
-    if opt.repository.is_none() {
+    if let Some(ref repository) = opt.repository {
+        // validate input
+        let mut found = false;
+        for repo in repositories.iter() {
+            if &repo.name == repository {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            bail!(
+                "Specified repository '{}' does not exist on the server",
+                repository
+            )
+        }
+    } else {
         opt.repository = Some(rspm_status.cran_repo);
     }
 
@@ -116,7 +132,6 @@ fn main() -> Result<()> {
             source_repository,
         } => {
             if list {
-                let repositories = server_repositories(&opt.server)?;
                 for repo in repositories.iter() {
                     println!("{}", repo.name);
                 }
