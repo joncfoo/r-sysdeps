@@ -97,34 +97,77 @@ struct APIRepository {
     language: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct APISysReqs {
+    requirements: Vec<APIRequirement>,
+}
+
+#[derive(Debug, Deserialize)]
+struct APIRequirement {
+    name: String,
+    requirements: APIPackageRequirements,
+}
+
+#[derive(Debug, Deserialize)]
+struct APIPackageRequirements {
+    packages: Vec<String>,
+    pre_install: Option<Vec<APIPrePost>>,
+    install_scripts: Vec<String>,
+    post_install: Option<Vec<APIPrePost>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct APIPrePost {
+    command: String,
+    script: String,
+}
+
 fn main() -> Result<()> {
-    let mut opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::from_args();
     let (distribution, release) = detect_os(opt.os_name, opt.os_version)?;
     let rspm_status = server_status(&opt.server)?;
     let repositories = server_repositories(&opt.server)?;
 
-    if let Some(ref repository) = opt.repository {
-        // validate input
-        let mut found = false;
-        for repo in repositories.iter() {
-            if &repo.name == repository {
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            bail!(
-                "Specified repository '{}' does not exist on the server",
-                repository
-            )
-        }
-    } else {
-        opt.repository = Some(rspm_status.cran_repo);
-    }
+    let repository_name = opt.repository.unwrap_or(rspm_status.cran_repo);
+    let repository = repositories
+        .iter()
+        .filter(|&repo| repo.name == repository_name)
+        .take(1)
+        .next()
+        .ok_or(anyhow!(
+            "Specified repository '{}' does not exist on the server",
+            repository_name
+        ))?;
 
     match opt.action {
         Action::Package { packages } => {
-            // TODO
+            let response = server_sysreqs(
+                &opt.server,
+                &distribution,
+                &release,
+                repository.id,
+                &packages,
+            )
+            .with_context(|| "failed to do get system requirements")?;
+
+            for req in response.requirements {
+                println!("# R package: {}", req.name);
+                println!(
+                    "## System libraries: {}",
+                    req.requirements.packages.join(", ")
+                );
+                if let Some(pre_install) = req.requirements.pre_install {
+                    pre_install.iter().for_each(|p| println!("{}", p.script));
+                }
+                req.requirements
+                    .install_scripts
+                    .iter()
+                    .for_each(|script| println!("{}", script));
+                if let Some(post_install) = req.requirements.post_install {
+                    post_install.iter().for_each(|p| println!("{}", p.script));
+                }
+                println!();
+            }
         }
         Action::Repository {
             list,
@@ -136,7 +179,7 @@ fn main() -> Result<()> {
                     println!("{}", repo.name);
                 }
             } else if source_repository {
-                println!("{}/{}/latest", opt.server, opt.repository.unwrap());
+                println!("{}/{}/latest", opt.server, repository_name);
             } else if binary_repository {
                 let distro = rspm_status
                     .distros
@@ -163,9 +206,7 @@ fn main() -> Result<()> {
                 } else {
                     println!(
                         "{}/{}/__linux__/{}/latest",
-                        opt.server,
-                        opt.repository.unwrap(),
-                        distro.binary_url
+                        opt.server, repository_name, distro.binary_url
                     );
                 }
             }
@@ -173,6 +214,43 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn server_sysreqs(
+    server: &String,
+    distribution: &String,
+    release: &String,
+    repo_id: u64,
+    packages: &Vec<String>,
+) -> Result<APISysReqs> {
+    let mut u = url::Url::parse_with_params(
+        format!("{}/__api__/repos/{}/sysreqs", server, repo_id).as_str(),
+        &[("distribution", distribution), ("release", release)],
+    )
+    .with_context(|| "failed to construct server URL")?;
+    for pkgname in packages {
+        u.query_pairs_mut().append_pair("pkgname", pkgname);
+    }
+
+    let http_response = minreq::get(u.as_str())
+        .with_timeout(60)
+        .send()
+        .with_context(|| format!("failed to reach server {}", server))?;
+    if http_response.status_code < 200 || http_response.status_code > 299 {
+        bail!(format!(
+            "failed to reach {}/__api__/repos/{}/sysreqs",
+            server, repo_id
+        ));
+    }
+
+    let api_response = http_response.json().with_context(|| {
+        format!(
+            "failed to parse JSON response from {}/__api__/repos/{}/sysreqs",
+            server, repo_id
+        )
+    })?;
+
+    Ok(api_response)
 }
 
 fn server_repositories(server: &String) -> Result<Vec<APIRepository>> {
