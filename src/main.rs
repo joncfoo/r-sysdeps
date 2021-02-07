@@ -142,20 +142,24 @@ fn main() -> Result<()> {
                     .distros
                     .iter()
                     .filter(|distro| {
-                        distro.distribution == distribution && distro.release == release
+                        distro.distribution == distribution && release.starts_with(&distro.release)
                     })
                     .take(1)
                     .next()
                     .ok_or(anyhow!(
-                        "OS not supported by server: {}-{}",
+                        "server does not support OS {}-{}",
                         distribution,
-                        release
+                        release,
                     ))?;
 
                 if !rspm_status.binaries_enabled {
                     bail!("binary repositories not enabled on server")
                 } else if !distro.binaries {
-                    bail!("binary repositories not enabled for specified OS")
+                    bail!(
+                        "binary repositories not enabled for {}-{}",
+                        distribution,
+                        release
+                    )
                 } else {
                     println!(
                         "{}/{}/__linux__/{}/latest",
@@ -217,22 +221,15 @@ fn detect_os(os_name: Option<String>, os_version: Option<String>) -> Result<(Str
         return Ok((name, version));
     }
 
-    let known_os = vec![
-        "ubuntu-16.04",
-        "ubuntu-18.04",
-        "ubuntu-20.04",
-        "centos-7",
-        "centos-8",
-        "rhel-7",
-        "rhel-8",
-    ];
     let mut os_rename = HashMap::new();
-    os_rename.insert("rhel-7", "redhat-7");
-    os_rename.insert("rhel-8", "redhat-8");
+    os_rename.insert("rhel", "redhat");
 
     let mut os_attributes = HashMap::new();
 
-    let os_release = std::fs::read_to_string("/etc/os-release").unwrap();
+    let os_release = std::fs::read_to_string("/etc/os-release")
+        .with_context(|| format!("failed to read /etc/os-release"))?;
+
+    // read key value pairs from file
     os_release
         .lines()
         .map(|line| line.split("=").collect())
@@ -244,27 +241,8 @@ fn detect_os(os_name: Option<String>, os_version: Option<String>) -> Result<(Str
             );
         });
 
-    let os = match (os_attributes.get("ID"), os_attributes.get("VERSION_ID")) {
-        (Some(distribution), Some(version)) => known_os
-            .iter()
-            .filter_map(|&os| {
-                if os.starts_with(format!("{}-{}", distribution, version).as_str()) {
-                    let os = os_rename
-                        .get(os)
-                        .map(|&s| String::from(s))
-                        .or(Some(String::from(os)))
-                        .unwrap();
-                    let os_parts: Vec<&str> = os.split("-").collect();
-                    Some((String::from(os_parts[0]), String::from(os_parts[1])))
-                } else {
-                    None
-                }
-            })
-            .next(),
-        _ => None,
-    };
-
-    os.ok_or(anyhow!(
-        "Failed to auto-detect this OS from the list contained in this tool"
-    ))
+    match (os_attributes.get("ID"), os_attributes.get("VERSION_ID")) {
+        (Some(name), Some(version)) => Ok((String::from(name), String::from(version))),
+        _ => bail!("failed to detect linux distribution and/or version"),
+    }
 }
